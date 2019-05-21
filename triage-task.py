@@ -11,7 +11,7 @@ import gensim
 from gensim.models import KeyedVectors
 
 # wv_from_bin = gensim.models.KeyedVectors.load_word2vec_format('wikipedia-pubmed-and-PMC-w2v.bin', binary = True)
-wv_from_bin = gensim.models.KeyedVectors.load_word2vec_format('PubMed-and-PMC-w2v.bin',limit=100000, binary = True)
+wv_from_bin = gensim.models.KeyedVectors.load_word2vec_format('PubMed-and-PMC-w2v.bin', binary = True)
 print('Pubmed w2v model loaded.')
 
 
@@ -59,12 +59,52 @@ documents_test = documents_test.drop(columns = ['passages', 'relations', 'passag
 documents_test['infons.relevant'].replace('no', 0, inplace = True)
 documents_test['infons.relevant'].replace('yes', 1, inplace = True)
 documents_test.name = 'test'
-print(documents_test.head(4))
-print(documents_test['passage.text'][0])
+
+def concat_text(dataframe):
+    d = {
+        'passage.text':[],
+        'infons.relevant':[]
+    }
+    # temp = ''
+    title_count = 0
+    abst_count = 0
+    for index, row in dataframe.iterrows():
+    #     if index > 0 and index % 2 == 0:
+    #         d['passage.text'].append(temp)
+    #         d['infons.relevant'].append(row['infons.relevant'])
+    #         temp = ''
+    #     temp += row['passage.text']
+        if row['type'] == 'title':
+            temp = ''
+            temp += row['passage.text']
+            title_count += 1
+        else:
+            temp += row['passage.text']
+            d['passage.text'].append(temp)
+            d['infons.relevant'].append(row['infons.relevant'])
+            abst_count += 1
+
+    print(title_count)
+    print(abst_count)
+    df = pd.DataFrame(data=d)
+    return df
+
+### Concat the title and abstract
+
+new_documents = concat_text(documents)
+new_documents.name = 'training'
+
+new_documents_test = concat_text(documents_test)
+new_documents_test.name = 'test'
+
+### Check document size
+# max(documents.astype('str').applymap(lambda x: len(x)).max())
+# max(documents_test.astype('str').applymap(lambda x: len(x)).max())
+
+maxlen = 3900
 
 
 # ### Text to word sequence (embedding)
-
 
 from keras.preprocessing.text import text_to_word_sequence
 
@@ -75,8 +115,8 @@ def vectorize(row, text, embedding_matrix):
         except:
             pass
         
-embedding_matrix_train = np.zeros((8162, 3559))
-embedding_matrix_test = np.zeros((2854, 3559))
+embedding_matrix_train = np.zeros((4080, maxlen))
+embedding_matrix_test = np.zeros((1427, maxlen))
 
 def word_sequence(df):
     df['passage.text'] = df['passage.text'].apply(lambda x: text_to_word_sequence(x, filters='!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\t\n', lower = False, split=' '))
@@ -89,11 +129,8 @@ def word_sequence(df):
 
 # ### Defining a baseline model
 
-# max(documents.astype('str').applymap(lambda x: len(x)).max())
-# max(documents_test.astype('str').applymap(lambda x: len(x)).max())
-
 # Training data
-word_sequence(documents)
+word_sequence(new_documents)
 X_train = embedding_matrix_train
 X_train_validation = X_train[8000:]
 X_train = X_train[:8000]
@@ -103,7 +140,7 @@ y_train_validation = y_train[8000:]
 y_train = y_train[:8000]
 
 # Test data
-word_sequence(documents_test)
+word_sequence(new_documents_test)
 X_test = embedding_matrix_test
 y_test = documents_test['infons.relevant'].values
 
@@ -114,7 +151,7 @@ print(X_train_validation.shape)
 # vocab_size = len(np.unique(X_train_batch)) + len(np.unique(X_test_batch))
 vocab_size = len(wv_from_bin.vocab)
 embedding_dim = len(wv_from_bin['the'])
-maxlen = 3559
+# maxlen = 3559
 
 print('Vocab size: ', vocab_size)
 print('Embedding dimensions: ', embedding_dim)
@@ -122,24 +159,23 @@ print('Document size ', maxlen)
 
 # # ### Keras embedding layer
 
-from keras.models import Sequential
+from keras.models import Model
 from keras import layers
 
  # Getting the embedding layer
 w2v_embedding = wv_from_bin.get_keras_embedding()
 
-import random 
-random.seed(42)
+np.random.seed(42)
 
-model = Sequential()
-# model.add(layers.Embedding(input_dim = vocab_size, 
-#                            output_dim = embedding_dim, 
-#                            input_length = maxlen))
-model.add(w2v_embedding)
-# model.add(layers.Flatten())
-model.add(layers.GlobalMaxPool1D())
-model.add(layers.Dense(10, activation = 'relu'))
-model.add(layers.Dense(1, activation = 'sigmoid'))
+# Create the model
+inputs = layers.Input(shape=(3900,))
+embedding = w2v_embedding(inputs)
+flatten = layers.Flatten()(embedding)
+dense = layers.Dense(10, activation = 'relu')(flatten)
+output = layers.Dense(1, activation = 'sigmoid')(dense)
+
+model = Model(inputs=inputs, outputs=output)
+
 model.compile(optimizer = 'adam',
               loss = 'binary_crossentropy',
               metrics = ['accuracy'])
@@ -171,7 +207,7 @@ def plot_history(history):
      plt.savefig('result.png')
 
 history = model.fit(X_train, y_train,
-                     epochs = 20,
+                     epochs = 150,
                      verbose = False,
                      validation_data = (X_train_validation, y_train_validation),
                     #  validation_split = 0.1,
