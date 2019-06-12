@@ -14,6 +14,8 @@ Reduzir o numero máximo de tokens num documento:
 
 # ### Imports
 
+import os, sys
+
 import gensim
 from gensim.models import KeyedVectors
 
@@ -32,11 +34,37 @@ plt.style.use('ggplot')
 
 # ### Global variables
 
+# 'local' for own machine or 'cluster' for cluster machine
+MODE = 'local'
+
 W2V_FILE = 'PubMed-and-PMC-w2v.bin'
-W2V_LIMIT = 10000
 TRAINSET_FILE = 'PMtask_Triage_TrainingSet.json'
 TESTSET_FILE = 'PMtask_Triage_TestSet.json'
+EVALSET_FILE = 'Predictions.json'
 SAVE_FIG_FILE = None
+USE_EVALUATE_SCRIPT = True
+
+if MODE == 'local' :
+    W2V_LIMIT = 10000
+    EPOCHS = 1
+    BATCHSIZE = 128
+    MODEL_ARC = 'dense'
+elif MODE == 'cluster':
+    W2V_LIMIT = None
+    EPOCHS = 200
+    BATCHSIZE = 128
+    MODEL_ARC = 'lstm-gpu'
+
+# Manual override
+# 'dense' -> Dense
+# 'lstm' -> Simple LSTM
+# 'lstm-gpu' -> CuDNNLSTM
+# MODEL_ARC = 'dense'
+
+if MODE != 'local' and MODE != 'cluster':
+    sys.exit('Specify a valid running mode: \'local\' or \'cluster\' ')
+if MODEL_ARC != 'dense' and MODEL_ARC != 'lstm' and MODEL_ARC != 'lstm-gpu':
+    sys.exit('Specify a valid running model: \'dense\' or \'lstm\' or \'lstm-gpu\' ')
 
 # ### Functions
 
@@ -65,21 +93,32 @@ def load_dataset(file):
 
 def concat_text(dataframe):
     d = {
+        'id':[],
         'passage.text':[],
         'infons.relevant':[]
     }
     title_count = 0
     abst_count = 0
+    last_read_row = None
+
     for index, row in dataframe.iterrows():
         if row['type'] == 'title':
+            if index > 0:
+                if(last_read_row['type'] == 'title'):
+                    d['id'].append(last_read_row['id'])
+                    d['passage.text'].append(last_read_row['passage.text'])
+                    d['infons.relevant'].append(last_read_row['infons.relevant'])
             temp = ''
             temp += row['passage.text']
             title_count += 1
+            last_read_row = row
         else:
             temp += row['passage.text']
+            d['id'].append(row['id'])
             d['passage.text'].append(temp)
             d['infons.relevant'].append(row['infons.relevant'])
             abst_count += 1
+            last_read_row = row
 
     print("Number of titles encountered:",title_count)
     print("Number of abstracts encountered:",abst_count)
@@ -102,7 +141,7 @@ def word_sequence(df, shape):
         vectorize(index, row['passage.text'], embedding_matrix)
     return embedding_matrix
 
-def train_test_split(train_embedding, test_embedding, corpus, corpus_test, validation_size=0):
+def data_split(train_embedding, test_embedding, corpus, corpus_test, validation_size=0):
     # Training data
     X_train = train_embedding
     y_train = corpus['infons.relevant'].values
@@ -143,13 +182,13 @@ def plot_history(history, file_name=None):
     if(file_name != None):
         plt.savefig(file_name)
     
-def build_compile_model_Dense(input_shape):
+def build_compile_model_Dense(input_shape, w2v_embedding):
 
     inputs = layers.Input(shape=input_shape)
     embedding = w2v_embedding(inputs)
     flatten = layers.Flatten()(embedding)
-    dense = layers.Dense(10, activation = 'relu')(flatten)
-    output = layers.Dense(1, activation = 'sigmoid')(dense)
+    # dense = layers.Dense(10, activation = 'relu')(flatten)
+    output = layers.Dense(1, activation = 'sigmoid')(flatten)
 
     model = Model(inputs=inputs, outputs=output)
 
@@ -173,7 +212,7 @@ def build_compile_model_LSTM(input_shape, w2v_embedding):
                   metrics = ['accuracy'])
     return model
     
-def model_lstm_du(input_shape):
+def model_lstm_du(input_shape, w2v_embedding):
     inp = layers.Input(shape=input_shape)
     x = w2v_embedding(inp)
     '''
@@ -192,7 +231,7 @@ def model_lstm_du(input_shape):
     model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
     return model
 
-def fit_model(model, X_train, y_train, x_validation, y_validation, epochs, batch_size, verbose=0):
+def fit_model(model, X_train, y_train, X_validation, y_validation, epochs, batch_size, verbose=0):
     history = model.fit(X_train, y_train,
                         epochs = epochs,
                         verbose = verbose,
@@ -200,10 +239,28 @@ def fit_model(model, X_train, y_train, x_validation, y_validation, epochs, batch
                         batch_size = batch_size)
     return history
 
+def save_predictions(model, corpus_test, test_sequence):
+    data = {}
+    documents = []
+    # predict_count = 0
+    predictions = model.predict(test_sequence)
+    for index, row in corpus_test.iterrows():
+        doc = {}
+        infons = {}
+        doc['id'] = row['id']
+        infons['relevant'] = 'no' if predictions[index] <= 0.5 else 'yes'
+        doc['infons'] = infons
+        documents.append(doc)
+
+    data['documents'] = documents
+    with open(EVALSET_FILE, 'w') as out:
+        json.dump(data, out)
+
+
 
 # ## Main
 if __name__ == "__main__":
-    
+
     df = load_dataset(TRAINSET_FILE)
     df_test = load_dataset(TESTSET_FILE)
     print("Total of training documents: ", df.shape[0])
@@ -225,13 +282,13 @@ if __name__ == "__main__":
     print("Validation size:",int(validation_size))
     
 
-    embedding_matrix_train = word_sequence(corpus, (corpus.shape[0], maxlen))
-    embedding_matrix_test = word_sequence(corpus_test, (corpus_test.shape[0], maxlen))
-    X_train, X_validation, X_test, y_train, y_validation, y_test = train_test_split(embedding_matrix_train,
-                                                                                    embedding_matrix_test,
-                                                                                    corpus,
-                                                                                    corpus_test,
-                                                                                    validation_size=validation_size)
+    train_word_sequence = word_sequence(corpus, (corpus.shape[0], maxlen))
+    test_word_sequence = word_sequence(corpus_test, (corpus_test.shape[0], maxlen))
+    X_train, X_validation, X_test, y_train, y_validation, y_test = data_split(train_word_sequence,
+                                                                                test_word_sequence,
+                                                                                corpus,
+                                                                                corpus_test,
+                                                                                validation_size=validation_size)
     print('Training set size: ', X_train.shape[0])
     print('Training targets set size: ', y_train.shape[0])
     print('Validation set size: ', X_validation.shape[0])
@@ -250,14 +307,28 @@ if __name__ == "__main__":
     # Getting the embedding layer
     w2v_embedding = wv_from_bin.get_keras_embedding()
 
-    model = build_compile_model_Dense((maxlen,))
+    if MODEL_ARC == 'dense':
+        model = build_compile_model_Dense((maxlen,), w2v_embedding)
+    elif MODEL_ARC == 'lstm':
+        model = build_compile_model_LSTM((maxlen,), w2v_embedding)
+    elif MODEL_ARC == 'lstm-gpu':
+        model = model_lstm_du((maxlen,), w2v_embedding)
+
 
     # #### Model fitting and accuracy
 
-    history = fit_model(model, X_train, y_train, X_validation, y_validation, epochs=1, batch_size=128, verbose=1)
+    history = fit_model(model, X_train, y_train, X_validation, y_validation, epochs=EPOCHS, batch_size=BATCHSIZE, verbose=1)
+
     loss, accuracy = model.evaluate(X_train, y_train, verbose = False)
     print("Training Accuracy: {:.4f}".format(accuracy))
+    
     loss, accuracy = model.evaluate(X_test, y_test, verbose = False)
     print("Testing Accuracy:  {:.4f}".format(accuracy))
+    
     plot_history(history, SAVE_FIG_FILE)
-
+    
+    if(USE_EVALUATE_SCRIPT):
+        print('---------------------EVALUATION SCRIPT OUTPUT---------------------------')
+        save_predictions(model, corpus_test, test_word_sequence)
+        os.system('python eval_json.py triage ' + TESTSET_FILE + ' ' + EVALSET_FILE)
+        print('--------------------------END OF OUTPUT---------------------------------')
