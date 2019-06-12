@@ -35,9 +35,9 @@ plt.style.use('ggplot')
 # ### Global variables
 
 # 'local' for own machine or 'cluster' for cluster machine
-MODE = 'local'
+MODE = 'cluster'
 
-W2V_FILE = 'PubMed-and-PMC-w2v.bin'
+W2V_FILE = '~/tmp/PubMed-and-PMC-w2v.bin'
 TRAINSET_FILE = 'PMtask_Triage_TrainingSet.json'
 TESTSET_FILE = 'PMtask_Triage_TestSet.json'
 EVALSET_FILE = 'Predictions.json'
