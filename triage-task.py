@@ -32,7 +32,7 @@ plt.style.use('ggplot')
 
 # ### Global variables
 
-W2V_FILE = 'Pubmed-and-PMC-w2v.bin'
+W2V_FILE = 'PubMed-and-PMC-w2v.bin'
 W2V_LIMIT = 10000
 TRAINSET_FILE = 'PMtask_Triage_TrainingSet.json'
 TESTSET_FILE = 'PMtask_Triage_TestSet.json'
@@ -158,7 +158,41 @@ def build_compile_model_Dense(input_shape):
                   metrics = ['accuracy'])
     return model
 
-def fit_model(model, X_train, y_train, x_validation, y_validation, epochs, batch_size, verbose=False):
+def build_compile_model_LSTM(input_shape, w2v_embedding):
+
+    inputs = layers.Input(shape=input_shape)
+    embedding = w2v_embedding(inputs)
+    lstm = layers.LSTM(64)(embedding)
+    dense = layers.Dense(10, activation = 'relu')(lstm)
+    output = layers.Dense(1, activation = 'sigmoid')(dense)
+
+    model = Model(inputs=inputs, outputs=output)
+
+    model.compile(optimizer = 'adam',
+                  loss = 'binary_crossentropy',
+                  metrics = ['accuracy'])
+    return model
+    
+def model_lstm_du(input_shape):
+    inp = layers.Input(shape=input_shape)
+    x = w2v_embedding(inp)
+    '''
+    Here 64 is the size(dim) of the hidden state vector as well as the output vector. Keeping return_sequence we want the output for the entire sequence. So what is the dimension of output for this layer?
+        64*70(maxlen)*2(bidirection concat)
+    CuDNNLSTM is fast implementation of LSTM layer in Keras which only runs on GPU
+    '''
+    x = layers.Bidirectional(layers.CuDNNLSTM(64, return_sequences=True))(x)
+    avg_pool = layers.GlobalAveragePooling1D()(x)
+    max_pool = layers.GlobalMaxPooling1D()(x)
+    conc = layers.concatenate([avg_pool, max_pool])
+    conc = layers.Dense(64, activation='relu')(conc)
+    conc = layers.Dropout(0.1)(conc)
+    outp = layers.Dense(1, activation="sigmoid")(conc)
+    model = Model(inputs=inp, outputs=outp)
+    model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+    return model
+
+def fit_model(model, X_train, y_train, x_validation, y_validation, epochs, batch_size, verbose=0):
     history = model.fit(X_train, y_train,
                         epochs = epochs,
                         verbose = verbose,
@@ -220,7 +254,7 @@ if __name__ == "__main__":
 
     # #### Model fitting and accuracy
 
-    history = fit_model(model, X_train, y_train, X_validation, y_validation, epochs=1, batch_size=maxlen, verbose=True)
+    history = fit_model(model, X_train, y_train, X_validation, y_validation, epochs=1, batch_size=128, verbose=1)
     loss, accuracy = model.evaluate(X_train, y_train, verbose = False)
     print("Training Accuracy: {:.4f}".format(accuracy))
     loss, accuracy = model.evaluate(X_test, y_test, verbose = False)
