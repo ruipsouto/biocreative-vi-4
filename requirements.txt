@@ -4,3 +4,4 @@ matplotlib==3.0.3
 numpy==1.14.5
 Keras==2.2.4
 tensorflow-gpu==1.13.1
+h5py==2.9.0

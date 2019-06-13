@@ -29,7 +29,7 @@ from pandas.io.json import json_normalize
 from keras.preprocessing.text import text_to_word_sequence
 
 from keras.models import Model
-from keras import layers
+from keras import layers, callbacks
 
 import matplotlib.pyplot as plt
 plt.style.use('ggplot')
@@ -225,11 +225,16 @@ def model_lstm_du(input_shape, w2v_embedding):
     return model
 
 def fit_model(model, X_train, y_train, X_validation, y_validation, epochs, batch_size, verbose=0):
+    es = callbacks.EarlyStopping(monitor='val_acc', mode='max', verbose=1, patience=10)
+    mc = callbacks.ModelCheckpoint('best_model.h5', monitor='val_acc', mode='max', save_best_only=True, verbose=1)
+    cb_list = [es,mc]
+
     history = model.fit(X_train, y_train,
                         epochs = epochs,
                         verbose = verbose,
                         validation_data = (X_validation, y_validation),
-                        batch_size = batch_size)
+                        batch_size = batch_size,
+                        callbacks=cb_list)
     return history
 
 def save_predictions(model, ids_test, test_sequence):
