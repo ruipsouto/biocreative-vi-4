@@ -2,7 +2,7 @@ import sys
 
 # Configuration
 MODE = 'cluster' # local' for own machine or 'cluster' for cluster machine
-W2V_FILE = '~/tmp/PubMed-w2v.bin'
+W2V_FILE = '/tmp/PubMed-w2v.bin'
 TRAINSET_FILE = 'PMtask_Triage_TrainingSet.xml'
 TESTSET_FILE = 'PMtask_Triage_TestSet.xml'
 EVALSET_FILE = 'Predictions.json'
@@ -88,7 +88,7 @@ def vectorize_text(mode, texts, labels):
 
     data = pad_sequences(sequences, MAX_SEQUENCE_LENGTH)
 
-    labels = to_categorical(np.asarray(labels))
+    # labels = to_categorical(np.asarray(labels))
     print('Shape of data tensor:', data.shape)
     print('Shape of label tensor:', labels.shape)
     
@@ -314,7 +314,7 @@ if __name__ == "__main__":
 
 
     # Model fitting and accuracy
-    history = fit_model(model, X_train, y_train, X_validation, y_validation, epochs=EPOCHS, batch_size=BATCHSIZE, verbose=1)
+    history = fit_model(model, X_train, y_train, X_val, y_val, epochs=EPOCHS, batch_size=BATCHSIZE, verbose=1)
 
     loss, accuracy = model.evaluate(X_train, y_train, verbose = False)
     print("Training Accuracy: {:.4f}".format(accuracy))
