@@ -46,12 +46,12 @@ USE_EVALUATE_SCRIPT = True
 
 if MODE == 'local' :
     W2V_LIMIT = 10000
-    EPOCHS = 1
+    EPOCHS = 3
     BATCHSIZE = 128
     MODEL_ARC = 'dense'
 elif MODE == 'cluster':
     W2V_LIMIT = None
-    EPOCHS = 200
+    EPOCHS = 30
     BATCHSIZE = 128
     MODEL_ARC = 'lstm-gpu'
 
@@ -129,12 +129,12 @@ def concat_text(dataframe):
 def vectorize(row, text, embedding_matrix):
     for index, word in enumerate(text):
         try:
-            embedding_matrix[row][index] = wv_from_bin.wv.vocab[word].index
+            embedding_matrix[row][index] = wv_from_bin.vocab[word].index
         except:
             pass
 
 def word_sequence(df, shape):
-    embedding_matrix = np.ones(shape)
+    embedding_matrix = np.zeros(shape, dtype='int',)
     temp_df = pd.DataFrame()
     temp_df['passage.text'] = df['passage.text'].apply(lambda x: text_to_word_sequence(x, filters='!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\t\n', lower = False, split=' '))
     for index, row in temp_df.iterrows():
@@ -201,7 +201,7 @@ def build_compile_model_LSTM(input_shape, w2v_embedding):
 
     inputs = layers.Input(shape=input_shape)
     embedding = w2v_embedding(inputs)
-    lstm = layers.LSTM(64)(embedding)
+    lstm = layers.LSTM(2)(embedding)
     dense = layers.Dense(10, activation = 'relu')(lstm)
     output = layers.Dense(1, activation = 'sigmoid')(dense)
 
@@ -220,11 +220,11 @@ def model_lstm_du(input_shape, w2v_embedding):
         64*70(maxlen)*2(bidirection concat)
     CuDNNLSTM is fast implementation of LSTM layer in Keras which only runs on GPU
     '''
-    x = layers.Bidirectional(layers.CuDNNLSTM(64, return_sequences=True))(x)
+    x = layers.Bidirectional(layers.CuDNNLSTM(4, return_sequences=True))(x)
     avg_pool = layers.GlobalAveragePooling1D()(x)
     max_pool = layers.GlobalMaxPooling1D()(x)
     conc = layers.concatenate([avg_pool, max_pool])
-    conc = layers.Dense(64, activation='relu')(conc)
+    conc = layers.Dense(4, activation='relu')(conc)
     conc = layers.Dropout(0.1)(conc)
     outp = layers.Dense(1, activation="sigmoid")(conc)
     model = Model(inputs=inp, outputs=outp)
@@ -256,7 +256,27 @@ def save_predictions(model, corpus_test, test_sequence):
     with open(EVALSET_FILE, 'w') as out:
         json.dump(data, out)
 
+def debug_embedding(input_shape, w2v_embedding, test_embedding, X_test):
 
+    inputs = layers.Input(shape=input_shape)
+    embedding = w2v_embedding(inputs)
+
+    model = Model(inputs=inputs, outputs=embedding)
+
+    model.compile(optimizer = 'adam',
+                  loss = 'binary_crossentropy',
+                  metrics = ['accuracy'])
+    
+    predictions = model.predict(X_test[:1])
+    print(predictions)
+    print('-----------')
+    line = test_embedding[0]
+    result = []
+    for i in range(5):
+        word = line[i]
+        word = wv_from_bin.index2entity[word]
+        result.append(wv_from_bin.get_vector(word))
+    print(result)
 
 # ## Main
 if __name__ == "__main__":
@@ -277,10 +297,14 @@ if __name__ == "__main__":
     maxlen = 3900
     print("Max lenght for all docs after padding: ", maxlen)
 
-
+    wv_from_bin = load_pretrained_w2v(W2V_FILE, W2V_LIMIT)
+    vocab_size = len(wv_from_bin.vocab)
+    embedding_dim = len(wv_from_bin['the'])
+    print('Vocab size:', vocab_size)
+    print('Embedding dimensions:', embedding_dim)
+    
     validation_size = int(corpus.shape[0]*0.1)
     print("Validation size:",int(validation_size))
-    
 
     train_word_sequence = word_sequence(corpus, (corpus.shape[0], maxlen))
     test_word_sequence = word_sequence(corpus_test, (corpus_test.shape[0], maxlen))
@@ -296,12 +320,6 @@ if __name__ == "__main__":
     print('Test set size: ', X_test.shape[0])
     print('Test targets set size: ', y_test.shape[0])
 
-    wv_from_bin = load_pretrained_w2v(W2V_FILE, W2V_LIMIT)
-    vocab_size = len(wv_from_bin.vocab)
-    embedding_dim = len(wv_from_bin['the'])
-    print('Vocab size:', vocab_size)
-    print('Embedding dimensions:', embedding_dim)
-
     # #### Keras Model
     
     # Getting the embedding layer
@@ -313,6 +331,11 @@ if __name__ == "__main__":
         model = build_compile_model_LSTM((maxlen,), w2v_embedding)
     elif MODEL_ARC == 'lstm-gpu':
         model = model_lstm_du((maxlen,), w2v_embedding)
+    elif MODEL_ARC == 'debug-embedding':
+        debug_embedding((maxlen,), w2v_embedding, test_word_sequence, X_test)
+        sys.exit(0)
+    
+    model.summary()
 
 
     # #### Model fitting and accuracy
