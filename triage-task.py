@@ -31,6 +31,8 @@ from keras.preprocessing.text import text_to_word_sequence
 from keras.models import Model
 from keras import layers, callbacks
 
+from attention import Attention
+
 import matplotlib.pyplot as plt
 plt.style.use('ggplot')
 
@@ -191,19 +193,23 @@ def build_compile_model_Dense(input_shape, w2v_embedding):
     return model
 
 def build_compile_model_LSTM(input_shape, w2v_embedding):
+    inputs = layers.Input(shape=input_shape)
+    x = w2v_embedding(inputs)
+    x = Bidirectional(CuDNNLSTM(128, return_sequences=True))(x)
+    x = Bidirectional(CuDNNLSTM(64, return_sequences=True))(x)
+    x = AttentionWithContext()(x)
+    x = Dense(64, activation="relu")(x)
+    x = Dense(1, activation="sigmoid")(x)
 
+    model = Model(inputs=inp, outputs=x)
+
+    model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+    
+    return model
+
+def build_compile_model_Attention(input_shape, w2v_embedding):
     inputs = layers.Input(shape=input_shape)
     embedding = w2v_embedding(inputs)
-    lstm = layers.LSTM(2)(embedding)
-    dense = layers.Dense(10, activation = 'relu')(lstm)
-    output = layers.Dense(1, activation = 'sigmoid')(dense)
-
-    model = Model(inputs=inputs, outputs=output)
-
-    model.compile(optimizer = 'adam',
-                  loss = 'binary_crossentropy',
-                  metrics = ['accuracy'])
-    return model
     
 def model_lstm_du(input_shape, w2v_embedding):
     inp = layers.Input(shape=input_shape)
