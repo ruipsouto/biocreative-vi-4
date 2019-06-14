@@ -28,7 +28,7 @@ from pandas.io.json import json_normalize
 
 from keras.preprocessing.text import text_to_word_sequence
 
-from keras.models import Model
+from keras.models import Model, load_model
 from keras import layers, callbacks
 
 from attention import AttentionWithContext
@@ -39,7 +39,7 @@ plt.style.use('ggplot')
 # ### Global variables
 
 # 'local' for own machine or 'cluster' for cluster machine
-MODE = 'cluster'
+MODE = 'local'
 
 W2V_FILE = 'PubMed-and-PMC-w2v.bin'
 TRAINSET_FILE = 'PMtask_Triage_TrainingSet.xml'
@@ -108,10 +108,13 @@ def concat_text(titles, abstracts):
         
     return texts
 
-def get_max_sequence_length(texts, texts_test):
-    max_sequence_training = len(max(texts, key = len))
-    max_sequence_testing = len(max(texts_test, key = len))
-    maxlen = max_sequence_training if max_sequence_training > max_sequence_testing else max_sequence_testing
+def get_max_sequence_length(texts, texts_test=None):
+    if(texts_test != None):
+        max_sequence_training = len(max(texts, key = len))
+        max_sequence_testing = len(max(texts_test, key = len))
+        maxlen = max_sequence_training if max_sequence_training > max_sequence_testing else max_sequence_testing
+    else:
+        maxlen = len(max(texts, key = len))
     
     return maxlen
 
@@ -306,7 +309,7 @@ if __name__ == "__main__":
     texts_test = concat_text(titles_test, abstracts_test)
 
     MAX_SEQUENCE_LENGTH = get_max_sequence_length(texts, texts_test)
-    
+
     print("Total of training documents: ", len(texts))
     print('Total of testing documents: ',len(texts_test))
     print('Max Sequence Length:', MAX_SEQUENCE_LENGTH)
@@ -341,44 +344,50 @@ if __name__ == "__main__":
     print('Test targets set size: ', y_test.shape[0])
     print('')
 
-    print('-------------------TRAINING MODEL-------------------')
-    # #### Keras Model
-    
-    # Getting the embedding layer
-    w2v_embedding = wv_from_bin.get_keras_embedding()
+    if(len(sys.argv) == 2):
+        print('-------------------USING BEST MODEL-------------------')
+        filename = sys.argv[1]
+        model = load_model(filename)
 
-    if MODEL_ARC == 'dense':
-        model = build_compile_model_Dense((MAX_SEQUENCE_LENGTH,), w2v_embedding)
-    elif MODEL_ARC == 'lstm':
-        model = build_compile_model_LSTM((MAX_SEQUENCE_LENGTH,), w2v_embedding)
-    elif MODEL_ARC == 'lstm-gpu':
-        model = model_lstm_du((MAX_SEQUENCE_LENGTH,), w2v_embedding)
-    elif MODEL_ARC == 'lstm-attention':
-        model = build_compile_model_Attention((MAX_SEQUENCE_LENGTH,), w2v_embedding)
-    elif MODEL_ARC == 'debug-embedding':
-        debug_embedding((MAX_SEQUENCE_LENGTH,), w2v_embedding, test_word_sequence, X_test)
-        sys.exit(0)
-    
-    model.summary()
+    else:
+        print('-------------------TRAINING MODEL-------------------')
+        # #### Keras Model
+        
+        # Getting the embedding layer
+        w2v_embedding = wv_from_bin.get_keras_embedding()
+
+        if MODEL_ARC == 'dense':
+            model = build_compile_model_Dense((MAX_SEQUENCE_LENGTH,), w2v_embedding)
+        elif MODEL_ARC == 'lstm':
+            model = build_compile_model_LSTM((MAX_SEQUENCE_LENGTH,), w2v_embedding)
+        elif MODEL_ARC == 'lstm-gpu':
+            model = model_lstm_du((MAX_SEQUENCE_LENGTH,), w2v_embedding)
+        elif MODEL_ARC == 'lstm-attention':
+            model = build_compile_model_Attention((MAX_SEQUENCE_LENGTH,), w2v_embedding)
+        elif MODEL_ARC == 'debug-embedding':
+            debug_embedding((MAX_SEQUENCE_LENGTH,), w2v_embedding, test_word_sequence, X_test)
+            sys.exit(0)
+        
+        model.summary()
 
 
-    # #### Model fitting and accuracy
+        # #### Model fitting and accuracy
 
-    history = fit_model(model, X_train, y_train, X_validation, y_validation, epochs=EPOCHS, batch_size=BATCHSIZE, verbose=1)
+        history = fit_model(model, X_train, y_train, X_validation, y_validation, epochs=EPOCHS, batch_size=BATCHSIZE, verbose=1)
 
 
-    print('')
+        print('')
 
-    print('--------------------MODEL EVALUATION-------------------')
+        print('--------------------MODEL EVALUATION-------------------')
 
-    loss, accuracy = model.evaluate(X_train, y_train, verbose = False)
-    print("Training Accuracy: {:.4f}".format(accuracy))
-    
-    loss, accuracy = model.evaluate(X_test, y_test, verbose = False)
-    print("Testing Accuracy:  {:.4f}".format(accuracy))
-    
-    plot_history(history, SAVE_FIG_FILE)
-    
+        loss, accuracy = model.evaluate(X_train, y_train, verbose = False)
+        print("Training Accuracy: {:.4f}".format(accuracy))
+        
+        loss, accuracy = model.evaluate(X_test, y_test, verbose = False)
+        print("Testing Accuracy:  {:.4f}".format(accuracy))
+        
+        plot_history(history, SAVE_FIG_FILE)
+        
     if(USE_EVALUATE_SCRIPT):
         print('---------------------EVALUATION SCRIPT OUTPUT---------------------------')
         save_predictions(model, ids_test, test_word_sequence)
