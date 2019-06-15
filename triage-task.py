@@ -30,6 +30,7 @@ from keras.preprocessing.text import text_to_word_sequence
 
 from keras.models import Model, load_model
 from keras import layers, callbacks
+from keras import backend as K
 
 from attention import AttentionWithContext
 
@@ -179,7 +180,38 @@ def plot_history(history, file_name=None):
     plt.legend()
     if(file_name != None):
         plt.savefig(file_name)
-    
+
+def f1(y_true, y_pred):
+    def recall(y_true, y_pred):
+        """Recall metric.
+
+        Only computes a batch-wise average of recall.
+
+        Computes the recall, a metric for multi-label classification of
+        how many relevant items are selected.
+        """
+        true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+        possible_positives = K.sum(K.round(K.clip(y_true, 0, 1)))
+        recall = true_positives / (possible_positives + K.epsilon())
+        return recall
+
+    def precision(y_true, y_pred):
+        """Precision metric.
+
+        Only computes a batch-wise average of precision.
+
+        Computes the precision, a metric for multi-label classification of
+        how many selected items are relevant.
+        """
+        true_positives = K.sum(K.round(K.clip(y_true * y_pred, 0, 1)))
+        predicted_positives = K.sum(K.round(K.clip(y_pred, 0, 1)))
+        precision = true_positives / (predicted_positives + K.epsilon())
+        return precision
+    precision = precision(y_true, y_pred)
+    recall = recall(y_true, y_pred)
+    return 2*((precision*recall)/(precision+recall+K.epsilon()))
+
+
 def build_compile_model_Dense(input_shape, w2v_embedding):
 
     inputs = layers.Input(shape=input_shape)
@@ -192,7 +224,7 @@ def build_compile_model_Dense(input_shape, w2v_embedding):
 
     model.compile(optimizer = 'adam',
                   loss = 'binary_crossentropy',
-                  metrics = ['accuracy'])
+                  metrics = ['acc',f1])
     return model
 
 def build_compile_model_LSTM(input_shape, w2v_embedding):
@@ -207,7 +239,7 @@ def build_compile_model_LSTM(input_shape, w2v_embedding):
 
     model.compile(optimizer = 'adam',
                   loss = 'binary_crossentropy',
-                  metrics = ['accuracy'])
+                  metrics = ['accuracy', f1])
     return model
 
 
@@ -223,7 +255,7 @@ def build_compile_model_Attention(input_shape, w2v_embedding):
 
     model = Model(inputs=inputs, outputs=x)
 
-    model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+    model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy', f1])
     
     return model
     
@@ -243,12 +275,12 @@ def model_lstm_du(input_shape, w2v_embedding):
     conc = layers.Dropout(0.1)(conc)
     outp = layers.Dense(1, activation="sigmoid")(conc)
     model = Model(inputs=inp, outputs=outp)
-    model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+    model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy', f1])
     return model
 
 def fit_model(model, X_train, y_train, X_validation, y_validation, epochs, batch_size, verbose=0):
-    es = callbacks.EarlyStopping(monitor='val_acc', mode='max', verbose=1, patience=10)
-    mc = callbacks.ModelCheckpoint('best_model.h5', monitor='val_acc', mode='max', save_best_only=True, verbose=1)
+    es = callbacks.EarlyStopping(monitor='val_f1', mode='max', verbose=1, patience=10)
+    mc = callbacks.ModelCheckpoint('best_model.h5', monitor='val_f1', mode='max', save_best_only=True, verbose=1)
     cb_list = [es,mc]
 
     history = model.fit(X_train, y_train,
@@ -347,7 +379,7 @@ if __name__ == "__main__":
     if(len(sys.argv) == 2):
         print('-------------------USING BEST MODEL-------------------')
         filename = sys.argv[1]
-        model = load_model(filename)
+        model = load_model(filename, custom_objects={'f1': f1})
 
     else:
         print('-------------------TRAINING MODEL-------------------')
@@ -380,11 +412,12 @@ if __name__ == "__main__":
 
         print('--------------------MODEL EVALUATION-------------------')
 
-        loss, accuracy = model.evaluate(X_train, y_train, verbose = False)
+        loss, accuracy, _ = model.evaluate(X_train, y_train, verbose = False)
         print("Training Accuracy: {:.4f}".format(accuracy))
         
-        loss, accuracy = model.evaluate(X_test, y_test, verbose = False)
+        loss, accuracy, f1 = model.evaluate(X_test, y_test, verbose = False)
         print("Testing Accuracy:  {:.4f}".format(accuracy))
+        print("Testing f1 score: {:.4f}".format(f1))
         
         plot_history(history, SAVE_FIG_FILE)
         
