@@ -4,15 +4,17 @@
 # ## Triage Task
 #######################################################
 '''
-Utilizar o script de teste para validar a rede.
-Reduzir o numero máximo de tokens num documento:
-    - Retirar palavras mais comuns
 
 '''
 #######################################################
 
 
 # ### Imports
+
+from numpy.random import seed
+seed(1)
+from tensorflow import set_random_seed
+set_random_seed(2)
 
 import os, sys
 
@@ -25,14 +27,18 @@ import numpy as np
 import json 
 import pandas as pd 
 from pandas.io.json import json_normalize
+import tensorflow
 
 from keras.preprocessing.text import text_to_word_sequence
-
-from keras.models import Model, load_model
+from keras.models import Model, load_model, model_from_json
 from keras import layers, callbacks
 from keras import backend as K
 
-from attention import AttentionWithContext
+from capsule_v1 import Capsule
+from keras.utils import CustomObjectScope
+
+from functools import partial
+from bayes_opt import BayesianOptimization
 
 import matplotlib.pyplot as plt
 plt.style.use('ggplot')
@@ -46,40 +52,49 @@ W2V_FILE = 'PubMed-and-PMC-w2v.bin'
 TRAINSET_FILE = 'PMtask_Triage_TrainingSet.xml'
 TESTSET_FILE = 'PMtask_Triage_TestSet.xml'
 GOLD_STANDARD_FILE = 'PMtask_Triage_TestSet.json'
-EVALSET_FILE = 'Predictions.json'
-SAVE_FIG_FILE = None
-USE_EVALUATE_SCRIPT = True
+EVALSET_FILE = 'Predictions.json'   #Output file to save the predictions to
+SAVE_FIG_FILE = None                # If not None, the script will save the training curves diagram to the given file
+USE_EVALUATE_SCRIPT = True          # If true, the evaluation script will be used
+USE_BAYES_OPT = False
 
 if MODE == 'local' :
+    # Default settings for local machine
     W2V_LIMIT = 10000
     EPOCHS = 3
     BATCHSIZE = 128
     MODEL_ARC = 'dense'
 elif MODE == 'cluster':
+    # Default settings for cluster
     W2V_LIMIT = None
     EPOCHS = 30
     BATCHSIZE = 128
-    MODEL_ARC = 'lstm-gpu'
+    MODEL_ARC = 'capsule'
 
 # Manual override
 # 'dense' -> Dense
 # 'lstm' -> Simple LSTM
-# 'lstm-gpu' -> CuDNNLSTM
+# 'capsule' -> BiGRU with capsules
 # MODEL_ARC = 'dense'
 
 if MODE != 'local' and MODE != 'cluster':
     sys.exit('Specify a valid running mode: \'local\' or \'cluster\' ')
-if MODEL_ARC != 'dense' and MODEL_ARC != 'lstm' and MODEL_ARC != 'lstm-gpu':
-    sys.exit('Specify a valid running model: \'dense\' or \'lstm\' or \'lstm-gpu\' ')
+if MODEL_ARC != 'dense' and MODEL_ARC != 'lstm' and MODEL_ARC != 'capsule':
+    sys.exit('Specify a valid running model: \'dense\' or \'lstm\' or \'capsule\' ')
 
 # ### Functions
 
+'''
+Function that loads the pre trained word2vec from the binary file
+'''
 def load_pretrained_w2v(file, limit_words=None):
     wv_from_bin = gensim.models.KeyedVectors.load_word2vec_format(file,
                                                                   limit=limit_words, 
                                                                   binary = True)
     return wv_from_bin
-    
+
+'''
+Function where the dataset files are parsed and load into memory
+'''
 def parse_dataset(filename):
     ids = []
     titles = []
@@ -99,7 +114,10 @@ def parse_dataset(filename):
                 abstracts.append('')
                 
         return ids, titles, abstracts, labels
-    
+
+'''
+Function that concats the titles and abstracts into one document
+''' 
 def concat_text(titles, abstracts):
     texts = []
     
@@ -108,7 +126,9 @@ def concat_text(titles, abstracts):
         texts.append(text)
         
     return texts
-
+'''
+Function that calculates the maximum number of words weither on training or testing datasets
+''' 
 def get_max_sequence_length(texts, texts_test=None):
     if(texts_test != None):
         max_sequence_training = len(max(texts, key = len))
@@ -119,6 +139,9 @@ def get_max_sequence_length(texts, texts_test=None):
     
     return maxlen
 
+'''
+Function that converts words into its corresponding index in the w2v vocabulary
+''' 
 # Text to word sequence
 def vectorize(row, text, text_sequences):
     for index, word in enumerate(text):
@@ -127,6 +150,11 @@ def vectorize(row, text, text_sequences):
         except:
             pass
 
+'''
+Function that first transforms raw text into word sequences and then uses vectorize() to get the words indexes.
+Shape should be (number_of_documents, max_number_of_words_per_documents)
+The output is a matrix where each line is a document and each column is a token.
+''' 
 def word_sequence(texts, shape):
     text_sequences = np.zeros(shape, dtype='int')
     temp = [text_to_word_sequence(x, filters='!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\t\n', lower = False, split=' ') for x in texts]
@@ -134,6 +162,11 @@ def word_sequence(texts, shape):
         vectorize(index, line, text_sequences)
     return text_sequences
 
+'''
+The dataset was already divided into training and test, so data division in that manner was not a concern.
+This function is responsible for spliting the training set to have a validation set too, in case it is necessary. It also transform the arrays to numpy arrays.
+If shuffle is set to true, the training set is shuffled.
+'''
 def data_split(train_sequences, test_sequences, labels, labels_test, validation_size=0, shuffle=False):
     if(shuffle):
         indices = np.arange(len(train_sequences))
@@ -160,6 +193,10 @@ def data_split(train_sequences, test_sequences, labels, labels_test, validation_
         return X_train, X_validation, X_test, y_train, y_validation, y_test
     return X_train, X_test, y_train, y_test
 
+'''
+Function to plot the training vs validation fitting curves.
+file_name should be a string in case the plot should be saved to a file.
+'''
 def plot_history(history, file_name=None):
     acc = history.history['acc']
     val_acc = history.history['val_acc']
@@ -181,6 +218,9 @@ def plot_history(history, file_name=None):
     if(file_name != None):
         plt.savefig(file_name)
 
+'''
+Costum definition of the F-score metric
+'''
 def f1(y_true, y_pred):
     def recall(y_true, y_pred):
         """Recall metric.
@@ -211,14 +251,17 @@ def f1(y_true, y_pred):
     recall = recall(y_true, y_pred)
     return 2*((precision*recall)/(precision+recall+K.epsilon()))
 
-
+'''
+Function that builds a simple model with a 10 node and a 1 node hidden dense layers.
+This was the first model used but its mainly purpose was to run the script in the local machine for debuging.
+'''
 def build_compile_model_Dense(input_shape, w2v_embedding):
 
     inputs = layers.Input(shape=input_shape)
     embedding = w2v_embedding(inputs)
     flatten = layers.Flatten()(embedding)
-    # dense = layers.Dense(10, activation = 'relu')(flatten)
-    output = layers.Dense(1, activation = 'sigmoid')(flatten)
+    dense = layers.Dense(10, activation = 'relu')(flatten)
+    output = layers.Dense(1, activation = 'sigmoid')(dense)
 
     model = Model(inputs=inputs, outputs=output)
 
@@ -227,6 +270,9 @@ def build_compile_model_Dense(input_shape, w2v_embedding):
                   metrics = ['acc',f1])
     return model
 
+'''
+Function to experiment an LSTM implementation
+'''
 def build_compile_model_LSTM(input_shape, w2v_embedding):
 
     inputs = layers.Input(shape=input_shape)
@@ -242,42 +288,32 @@ def build_compile_model_LSTM(input_shape, w2v_embedding):
                   metrics = ['accuracy', f1])
     return model
 
-
-
-def build_compile_model_Attention(input_shape, w2v_embedding):
-    inputs = layers.Input(shape=input_shape)
+'''
+Function that builds the final approach to the challenge.
+The model is a BiGRU with capsule networks instead of CNN.
+'''
+def build_compile_model_Capsule(input_shape, w2v_embedding, learning_rate, gaussian_noise, embedding_dropout, num_gru_nodes, num_capsules, output_capsules, routing_iterations, capsule_dropout, adam_decay):
+    inputs = layers.Input(shape = input_shape)
     x = w2v_embedding(inputs)
-    x = layers.Bidirectional(layers.CuDNNLSTM(128, return_sequences=True))(x)
-    x = layers.Bidirectional(layers.CuDNNLSTM(64, return_sequences=True))(x)
-    x = AttentionWithContext()(x)
-    x = layers.Dense(64, activation="relu")(x)
-    x = layers.Dense(1, activation="sigmoid")(x)
+    x = layers.GaussianNoise(gaussian_noise)(x)
+    x = layers.Dropout(embedding_dropout)(x)
+    x = layers.Bidirectional(layers.GRU(num_gru_nodes, return_sequences = True))(x)
+    x = Capsule(num_capsules, output_capsules, routings = routing_iterations)(x)
+    x = layers.Dropout(capsule_dropout)(x)
+    x = layers.Flatten()(x)
+    # x = layers.Dense(1, activation = "sigmoid", kernel_regularizer = regularizers.l2(0.01))(x)
+    x = layers.Dense(1, activation = "sigmoid")(x)
 
-    model = Model(inputs=inputs, outputs=x)
-
-    model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy', f1])
-    
-    return model
-    
-def model_lstm_du(input_shape, w2v_embedding):
-    inp = layers.Input(shape=input_shape)
-    x = w2v_embedding(inp)
-    '''
-    Here 64 is the size(dim) of the hidden state vector as well as the output vector. Keeping return_sequence we want the output for the entire sequence. So what is the dimension of output for this layer?
-        64*70(maxlen)*2(bidirection concat)
-    CuDNNLSTM is fast implementation of LSTM layer in Keras which only runs on GPU
-    '''
-    x = layers.Bidirectional(layers.CuDNNLSTM(4, return_sequences=True))(x)
-    avg_pool = layers.GlobalAveragePooling1D()(x)
-    max_pool = layers.GlobalMaxPooling1D()(x)
-    conc = layers.concatenate([avg_pool, max_pool])
-    conc = layers.Dense(4, activation='relu')(conc)
-    conc = layers.Dropout(0.1)(conc)
-    outp = layers.Dense(1, activation="sigmoid")(conc)
-    model = Model(inputs=inp, outputs=outp)
-    model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy', f1])
+    model = Model(inputs = inputs, outputs = x)
+    # adam = Adam(lr = learning_rate, decay = adam_decay)
+    model.compile(loss = "binary_crossentropy", optimizer = 'adam', metrics = ['accuracy', f1])
     return model
 
+'''
+Funtion used to fit the builded model.
+We implemented EarlyStopping and ModelCheckpoint to reduce training time. 
+Both callbacks measure improvements on the F-Score metric.
+'''
 def fit_model(model, X_train, y_train, X_validation, y_validation, epochs, batch_size, verbose=0):
     es = callbacks.EarlyStopping(monitor='val_f1', mode='max', verbose=1, patience=10)
     mc = callbacks.ModelCheckpoint('best_model.h5', monitor='val_f1', mode='max', save_best_only=True, verbose=1)
@@ -291,6 +327,49 @@ def fit_model(model, X_train, y_train, X_validation, y_validation, epochs, batch
                         callbacks=cb_list)
     return history
 
+def fit_with_capsule(X_train, y_train, X_validation, y_validation, input_shape, w2v_embedding, verbose, learning_rate, gaussian_noise, embedding_dropout, num_gru_nodes, num_capsules, output_capsules, routing_iterations, capsule_dropout, batch_size, adam_decay):
+    
+    num_gru_nodes = 128 # max(int(num_gru_nodes * 64), 64)
+    num_capsules = 8 # max(int(num_capsules * 8), 8)
+    output_capsules = 16 # max(int(output_capsules * 8), 8)
+    routing_iterations = 5 # max(int(routing_iterations * 2), 2)
+    batch_size = 128 # max(int(batch_size * 64), 64)
+    
+    blackbox = build_compile_model_Capsule(input_shape = input_shape,
+                                        w2v_embedding = w2v_embedding,
+                                        learning_rate = learning_rate,
+                                        gaussian_noise = gaussian_noise,
+                                        embedding_dropout = embedding_dropout,
+                                        num_gru_nodes = num_gru_nodes,
+                                        num_capsules = num_capsules,
+                                        output_capsules = output_capsules,
+                                        routing_iterations = routing_iterations,
+                                        capsule_dropout = capsule_dropout,
+                                        adam_decay = adam_decay)
+
+    es = callbacks.EarlyStopping(monitor = 'val_f1', mode = 'max', verbose = 1, patience = 10)
+    mc = callbacks.ModelCheckpoint('best_model.h5', monitor = 'val_f1', mode = 'max', save_best_only = True, verbose = 1)
+    cb_list = [es, mc]
+
+    blackbox = model.fit(x = X_train,
+                         y = y_train,
+                         verbose = 1,
+                         epochs = EPOCHS,
+                         batch_size = batch_size,
+                         validation_data = (X_validation, y_validation),
+                         callbacks = cb_list)
+
+    score = model.evaluate(x = X_validation, y = y_validation,  verbose = 1)
+    print('Test loss:', score[0])
+    print('Test accuracy:', score[1])
+
+    return score[1]
+
+'''
+Function used to save the predictions made by the model on the test set.
+The predictions are saved in json, where each document has the correspondent 'id' and
+the infons stating if the documents is relevant.
+'''
 def save_predictions(model, ids_test, test_sequence):
     data = {}
     documents = []
@@ -308,6 +387,10 @@ def save_predictions(model, ids_test, test_sequence):
     with open(EVALSET_FILE, 'w') as out:
         json.dump(data, out)
 
+'''
+Function used to debug the usage of the embedding layer.
+The idea was to compare embeddings given by the layer with manually converted ones.
+'''
 def debug_embedding(input_shape, w2v_embedding, test_embedding, X_test):
 
     inputs = layers.Input(shape=input_shape)
@@ -379,7 +462,17 @@ if __name__ == "__main__":
     if(len(sys.argv) == 2):
         print('-------------------USING BEST MODEL-------------------')
         filename = sys.argv[1]
-        model = load_model(filename, custom_objects={'f1': f1})
+        
+        if(MODEL_ARC == 'capsule'):
+            with CustomObjectScope({'Capsule': Capsule, 'f1': f1}):
+                model = load_model(filename)
+                summary = str(model.summary())
+                print(summary)
+                config = model.get_config()
+                model_json = model.to_json()
+                with open("model.json", "w") as json_file:
+                        json_file.write(model_json)
+                print(config)
 
     else:
         print('-------------------TRAINING MODEL-------------------')
@@ -392,10 +485,50 @@ if __name__ == "__main__":
             model = build_compile_model_Dense((MAX_SEQUENCE_LENGTH,), w2v_embedding)
         elif MODEL_ARC == 'lstm':
             model = build_compile_model_LSTM((MAX_SEQUENCE_LENGTH,), w2v_embedding)
-        elif MODEL_ARC == 'lstm-gpu':
-            model = model_lstm_du((MAX_SEQUENCE_LENGTH,), w2v_embedding)
-        elif MODEL_ARC == 'lstm-attention':
-            model = build_compile_model_Attention((MAX_SEQUENCE_LENGTH,), w2v_embedding)
+        elif MODEL_ARC == 'capsule':
+            input_shape = (MAX_SEQUENCE_LENGTH, )
+            if(USE_BAYES_OPT):
+                pbounds = {'learning_rate': (1e-4, 1e-2),
+                           'gaussian_noise': (0.0, 0.5),
+                           'embedding_dropout': (0.0, 0.5),
+                           'num_gru_nodes': (0.9, 3.1),
+                           'num_capsules': (0.9, 3.1),
+                           'output_capsules': (0.9, 3.1),
+                           'routing_iterations': (0.9, 3.1),
+                           'capsule_dropout': (0.0, 0.5),
+                           'batch_size': (0.9, 3.1),
+                           'adam_decay': (1e-6, 1e-2)}
+
+                verbose = 1
+                fit_with_partial = partial(fit_with_capsule, X_train, y_train, X_validation, y_validation, input_shape, w2v_embedding, verbose)
+
+                optimizer = BayesianOptimization(
+                    f = fit_with_partial,
+                    pbounds = pbounds,
+                    verbose = 2,
+                    random_state = 1
+                )
+
+                optimizer.maximize(init_points = 10, n_iter = 10)
+
+                for i, res in enumerate(optimizer.res):
+                    print("Iteration {}: \n\t{}".format(i, res))
+
+                print(optimizer.max)
+            
+            elif(USE_BAYES_OPT == False):
+                 # model = build_compile_model_Capsule(input_shape, w2v_embedding, 1e-3, 0.1, 0.3, 128, 8, 16, 5, 0.3, 0.0)
+                 model = build_compile_model_Capsule(input_shape = input_shape,
+                                                     w2v_embedding = w2v_embedding, 
+                                                     learning_rate = 1e-3,
+                                                     gaussian_noise = 0.0,
+                                                     embedding_dropout = 0.0,
+                                                     num_gru_nodes = 128, 
+                                                     num_capsules = 8, 
+                                                     output_capsules = 16, 
+                                                     routing_iterations = 5, 
+                                                     capsule_dropout = 0.0, 
+                                                     adam_decay = 0.0)
         elif MODEL_ARC == 'debug-embedding':
             debug_embedding((MAX_SEQUENCE_LENGTH,), w2v_embedding, test_word_sequence, X_test)
             sys.exit(0)
@@ -425,5 +558,9 @@ if __name__ == "__main__":
         print('---------------------EVALUATION SCRIPT OUTPUT---------------------------')
         save_predictions(model, ids_test, test_word_sequence)
         os.system('python eval_json.py triage ' + GOLD_STANDARD_FILE + ' ' + EVALSET_FILE)
+
+    K.clear_session()
+    tensorflow.reset_default_graph()
+    del model
 
     print('---------------------------END---------------------------------')
